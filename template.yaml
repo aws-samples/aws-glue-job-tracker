@@ -1,0 +1,188 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
+
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  aws-glue-job-tracker
+
+  SAM Template for aws-glue-job-tracker
+
+# More info about Globals: https://github.com/awslabs/serverless-application-model/blob/master/docs/globals.rst
+Globals:
+  Function:
+    Timeout: 3
+Parameters:
+  GlueJobWorkerLimit:
+    Type: Number
+    Default: 10
+    Description: Enter the maximum amount of workers allowed for an AWS Glue Job configuration.
+  GlueJobTimeoutLimit:
+    Type: Number
+    Default: 480
+    Description: Enter the maximum amount of time a Glue job should run before it times out. Default is 8 hours or 480 minutes.
+  GlueJobNotifications:
+    Type: String
+    Default: 'email@anycompany.com'
+    AllowedPattern: '[^@]+@[^@]+\.[^@]+'
+    Description: Email address or distribution list to receive notifications.
+Resources:
+    GlueJobTrackerRole:
+      Type: AWS::IAM::Role
+      Properties:
+          AssumeRolePolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Principal:
+                  Service:
+                    - glue.amazonaws.com
+                    - lambda.amazonaws.com
+                    - events.amazonaws.com
+                Action:
+                  - 'sts:AssumeRole'
+          Path: /
+    GlueJobTrackerMonitorPolicy:
+      Type: AWS::IAM::Policy
+      Properties:
+        PolicyName: GlueJobTrackerMonitorPolicy
+        PolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+            - Effect: Allow
+              Action: 
+                - glue:GetJobRun
+                - glue:GetTags
+                - dynamodb:PutItem
+                - logs:CreateLogGroup
+                - logs:CreateLogStream
+                - logs:PutLogEvents
+                - sns:Publish
+              Resource: '*'
+        Roles: 
+          - !Ref GlueJobTrackerRole
+    GlueJobTrackerReportPolicy:
+      Type: AWS::IAM::Policy
+      Properties:
+        PolicyName: GlueJobTrackerReportPolicy
+        PolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+            - Effect: Allow
+              Action: 
+                - dynamodb:PartiQLSelect
+                - logs:CreateLogGroup
+                - logs:CreateLogStream
+                - logs:PutLogEvents
+                - ses:SendEmail
+              Resource: '*'
+        Roles: 
+          - !Ref GlueJobTrackerRole
+    GlueJobTrackerEventBridgePolicy:
+      Type: AWS::IAM::Policy
+      Properties:
+        PolicyName: GlueJobTrackerEventBridgePolicy
+        PolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+            - Effect: Allow
+              Action: 
+                - lambda:InvokeFunction
+              Resource: !GetAtt GlueJobLambdaFunction.Arn
+        Roles: 
+          - !Ref GlueJobTrackerRole
+    GlueJobTrackerTopic:
+      Type: AWS::SNS::Topic
+    GlueJobTrackerSubscription:
+      Type: AWS::SNS::Subscription
+      Properties:
+        Endpoint: !Ref GlueJobNotifications
+        Protocol: email
+        TopicArn: !Ref GlueJobTrackerTopic
+    GlueJobTrackerEmailIdentity:
+        Type: AWS::SES::EmailIdentity
+        Properties:
+            EmailIdentity: !Ref GlueJobNotifications
+    GlueDynamoDBTable:
+        Type: AWS::DynamoDB::Table
+        Properties:
+            AttributeDefinitions: 
+              - 
+                AttributeName: 'glue_id'
+                AttributeType: 'S'
+            BillingMode: PAY_PER_REQUEST
+            KeySchema: 
+              - 
+                AttributeName: 'glue_id'
+                KeyType: 'HASH'
+            TimeToLiveSpecification: {'AttributeName': 'ttl', 'Enabled': 'true'}
+    GlueJobLambdaFunction:
+        Type: AWS::Serverless::Function
+        Properties:
+            Description: Processes events passed from EventBridge.
+            Handler: glue_event.lambda_handler
+            Architectures: 
+              - "x86_64"
+            CodeUri: glue_function/
+            Environment:
+              Variables:
+                REGION: !Sub '${AWS::Region}'
+                ACCOUNT: !Sub '${AWS::AccountId}'
+                WORKER_LIMIT: !Ref GlueJobWorkerLimit
+                TIMEOUT_LIMIT: !Ref GlueJobTimeoutLimit
+                DDB_TABLE: !Ref 'GlueDynamoDBTable'
+                SNS_TOPIC: !Ref GlueJobTrackerTopic
+            MemorySize: 128
+            Role: !GetAtt GlueJobTrackerRole.Arn
+            Runtime: python3.9
+            Timeout: 60
+            Tracing: PassThrough
+            EphemeralStorage: 
+                Size: 512
+            Events:
+              GlueEventRule:
+                Type: EventBridgeRule
+                Properties:
+                  Pattern:
+                    detail-type:
+                    -  Glue Job State Change
+                    source:
+                      - aws.glue
+                    detail:
+                        state:
+                          - SUCCEEDED
+                          - FAILED
+                          - TIMEOUT
+                          - STOPPED
+                State: ENABLED
+                Target: !GetAtt GlueJobLambdaFunction.Arn
+    GlueJobReportFunction:
+        Type: AWS::Serverless::Function
+        Properties:
+            Description: Queries DynamoDB, aggregates data and sends report through SES.
+            Handler: glue_report.lambda_handler
+            Architectures: 
+              - 'x86_64'
+            CodeUri: glue_function/
+            Environment:
+              Variables:
+                REGION: !Sub '${AWS::Region}'
+                ACCOUNT: !Sub '${AWS::AccountId}'
+                DDB_TABLE: !Ref 'GlueDynamoDBTable'
+                SES_EMAIL: !Ref 'GlueJobTrackerEmailIdentity'
+            MemorySize: 128
+            Role: !GetAtt GlueJobTrackerRole.Arn
+            Runtime: python3.9
+            Timeout: 120
+            Layers:
+              - 'arn:aws:lambda:us-east-1:336392948345:layer:AWSSDKPandas-Python39:5'
+            Tracing: PassThrough
+            EphemeralStorage: 
+                Size: 512
+            Events:
+              GlueScheduleRule:
+                Type: Schedule
+                Properties:
+                  Description: 'Starts Lambda reporting function every 7 days'
+                  Schedule: 'rate(7 days)'
+                  Enabled: true                
