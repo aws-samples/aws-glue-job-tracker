@@ -3,28 +3,29 @@
 # Deploy the solution
 This AWS SAM application provisions the following resources:
 
-•	Two EventBridge rules
-•	Two Lambda functions
-•	An SNS topic and subscription
-•	A DynamoDB table
-•	An SES subscription
-•	The required IAM roles and policies
+*	Two EventBridge rules
+*	Two Lambda functions
+*	An SNS topic and subscription
+*	A DynamoDB table
+*	An SES subscription
+*	The required IAM roles and policies
 
 To deploy the AWS SAM application, complete the following steps:
 
 1.	Clone the aws-samples GitHub repository: 
-
+```
 git clone https://github.com/aws-samples/glue-job-tracker.git
-
+```
 2.	Deploy the AWS SAM application:
-
-cd glue-job-tracker
-sam deploy –guided
+```
+cd aws-glue-job-tracker
+sam deploy --guided
+```
 
 3.	Provide the following parameters:
-a.	GlueJobWorkerLimit – Enter the maximum number of workers you want an AWS Glue job to be able to run with. The default is 10.
-b.	GlueJobTimeoutLimit – Enter the maximum time you want an AWS Glue job to run before it times out. The default is 480 minutes (8 hours).
-c.	GlueJobNotifications – Enter an email or distribution list of those who need to be notified through Amazon SNS and Amazon SES. You can go to the SNS topic after the deployment is complete and add emails as needed.
+    *	GlueJobWorkerLimit – Enter the maximum number of workers you want an AWS Glue job to be able to run with. The default is 10.
+    *	GlueJobTimeoutLimit – Enter the maximum time you want an AWS Glue job to run before it times out. The default is 480 minutes (8 hours).
+    *	GlueJobNotifications – Enter an email or distribution list of those who need to be notified through Amazon SNS and Amazon SES. You can go to the SNS topic after the deployment is complete and add emails as needed.
 
 To receive emails from Amazon SNS and Amazon SES, you must confirm your subscriptions. After the stack is deployed, check your email that was specified in the template and confirm by choosing the link in each message. 
 
