@@ -173,7 +173,7 @@ Resources:
             MemorySize: 128
             Role: !GetAtt GlueJobTrackerRole.Arn
             Runtime: python3.9
-            Timeout: 120
+            Timeout: 600
             Layers:
               - 'arn:aws:lambda:us-east-1:336392948345:layer:AWSSDKPandas-Python39:5'
             Tracing: PassThrough
