@@ -17,90 +17,92 @@ account = os.environ.get('ACCOUNT')
 DDB_TABLE = os.environ.get('DDB_TABLE')
 SES_EMAIL = os.environ.get('SES_EMAIL')
 # Create a new SES resource and specify a region.
-ses = boto3.client('ses',region_name=region)
+ses = boto3.client('ses', region_name=region)
+
 
 def lambda_handler(event, context):
 
     df = wr.dynamodb.read_partiql_query(
-            query=f"SELECT * FROM \"{DDB_TABLE}\""
-            )
-    
-    pdf = pd.DataFrame(df)
-    pdf['job_runtime_mins'] = pdf['job_runtime'].astype(float).div(60).round(2)
-    pdf['num_workers'] = pdf['num_workers'].astype(float).round(2)
-    pdf['dpu_seconds'] = pdf['dpu_seconds'].astype(float).round(2)
-    pdf['rate'] = pdf['rate'].astype(float).round(2)
-    pdf['job_version'] = pdf['job_version'].astype(float).round(1)
+        query=f"SELECT * FROM \"{DDB_TABLE}\""
+    )
 
-    # DPU hours = (DPU Seconds /60 /60) 
+    pdf = pd.DataFrame(df)
+    pdf['job_runtime_mins'] = pdf['job_runtime'].astype(float).div(60)
+    pdf['num_workers'] = pdf['num_workers'].astype(float)
+    pdf['dpu_seconds'] = pdf['dpu_seconds'].astype(float)
+    pdf['rate'] = pdf['rate'].astype(float)
+    pdf['job_version'] = pdf['job_version'].astype(float)
+    pdf['price_mult'] = pdf['price_mult'].astype(float)
+
+    # DPU hours = (DPU Seconds /60 /60)
     # autoscaling job cost = DPU hours * DPU rate/hr (.44)
-            
+
+    minimum_billed_dur = 1
+    minimum_billed_dur_legacy = 10
+
     def calc_cost(row):
-        if row['job_version'] > 2.0:
-            if row['worker_type'] == 'G.1X':
+        if row['job_version'] > 2.0 and row['job_runtime_mins'] > minimum_billed_dur:
+            if row['worker_type'] in ('G.1X', 'G.2X', 'G.4X', 'G.8X'):
                 if row['is_autoscaled'] == 'true' and row['dpu_seconds'] > 0:
                     return ((row['dpu_seconds'] / 60) / 60) * row['rate']
                 else:
-                    return (row['job_runtime_mins'] / 60) * row['num_workers'] * row['rate']
-            elif row['worker_type'] == 'G.2X':
-                if row['is_autoscaled'] == 'true' and row['dpu_seconds'] > 0:
-                    return ((row['dpu_seconds'] / 60) / 60) * row['rate'] * 2
-                else:
-                    return (row['job_runtime_mins'] / 60) * row['num_workers'] * row['rate'] * 2
+                    return (row['job_runtime_mins'] / 60) * row['num_workers'] * row['rate'] * row['price_mult']
             elif row['worker_type'] == 'Z.2X':
-                return (row['job_runtime_mins'] / 60) * row['num_workers'] * row['rate'] * 2
-        else: 
-            minimum_billed_dur = 10
-            if row['job_runtime_mins'] > minimum_billed_dur:
+                return (row['job_runtime_mins'] / 60) * row['num_workers'] * row['rate'] * row['price_mult']
+        elif row['job_version'] > 2.0 and row['job_runtime_mins'] < minimum_billed_dur:
+            return (minimum_billed_dur / 60) * row['num_workers'] * row['rate'] * row['price_mult']
+        else:
+            if row['job_runtime_mins'] > minimum_billed_dur_legacy:
                 return (row['job_runtime_mins'] / 60) * row['num_workers'] * row['rate']
             else:
-                return (minimum_billed_dur / 60) * row['num_workers'] * row['rate']
-                
-            
-    
-    pdf['est_cost'] = pdf.apply(calc_cost, axis=1).round(2)
+                return (minimum_billed_dur_legacy / 60) * row['num_workers'] * row['rate']
+
+    pdf['est_cost'] = pdf.apply(calc_cost, axis=1)
 
     # Total job runtime, total attempts, average workers per job
-    result = pdf.groupby('job_name').aggregate({'job_runtime_mins':'sum', 'run_attempt':'sum', 'num_workers':'mean', 'est_cost':'sum'}).sort_values(by='job_runtime_mins', ascending=False).round(2).rename({'run_attempt': 'retries', 'num_workers': 'avg_workers'}, axis=1)
+    result = pdf.groupby('job_name').aggregate({'job_runtime_mins': 'sum', 'run_attempt': 'sum', 'num_workers': 'mean', 'est_cost': 'sum'}).sort_values(
+        by='job_runtime_mins', ascending=False).round(3).rename({'run_attempt': 'retries', 'num_workers': 'avg_workers'}, axis=1)
 
-    print(pdf)    
     data = result.to_html()
-    print(data)
-    
+
     # Job run counts by status
     pdf['successful'] = pdf['job_state'].str.contains('SUCCEEDED')
     pdf['timeout'] = pdf['job_state'].str.contains('TIMEOUT')
     pdf['failed'] = pdf['job_state'].str.contains('FAILED')
     pdf['stopped'] = pdf['job_state'].str.contains('STOPPED')
-    
-    status_count = pdf.groupby('job_name')[['successful', 'timeout', 'failed', 'stopped']].sum().sort_values(by='failed', ascending=False)
+
+    status_count = pdf.groupby('job_name')[['successful', 'timeout', 'failed', 'stopped']].sum(
+    ).sort_values(by='failed', ascending=False)
     print(status_count)
     stats = status_count.to_html()
-    
+
     # Count job runs by worker type
-    worker_jobs = pdf.groupby('worker_type')[['worker_type']].count().rename({'worker_type': 'count'}, axis=1)
+    worker_jobs = pdf.groupby('worker_type')[['worker_type']].count().rename(
+        {'worker_type': 'count'}, axis=1)
     worker_jobs_html = worker_jobs.to_html()
-    
+
     # Count Standard and Flex jobs
-    job_run_type = pdf.groupby('exec_class')[['exec_class']].count().rename({'exec_class': 'count'}, axis=1)
+    job_run_type = pdf.groupby('exec_class')[['exec_class']].count().rename({
+        'exec_class': 'count'}, axis=1)
     job_run_html = job_run_type.to_html()
-    
+
     # Count number of job runs by Glue version
-    job_versions = pdf.groupby('job_version')[['job_version']].count().rename({'job_version': 'count'}, axis=1)
+    job_versions = pdf.groupby('job_version')[['job_version']].count().rename({
+        'job_version': 'count'}, axis=1)
     job_version_html = job_versions.to_html()
-    
+
     SENDER = SES_EMAIL
 
-    # Replace recipient@example.com with a "To" address. If your account 
+    # Replace recipient@example.com with a "To" address. If your account
     # is still in the sandbox, this address must be verified.
     RECIPIENT = SES_EMAIL
-    
+
     # The subject line for the email.
     SUBJECT = "AWS Glue Job Run Report"
-    
+
     # The email body for recipients with non-HTML email clients.
     BODY_TEXT = ("AWS Glue Weekly Job Run Report\r\n")
-                
+
     # The HTML body of the email.
     BODY_HTML = """<html>
     <head></head>
@@ -138,15 +140,15 @@ def lambda_handler(event, context):
       </p>
     </body>
     </html>
-                """.format(data, stats, worker_jobs_html, job_run_html, job_version_html)            
-    
+                """.format(data, stats, worker_jobs_html, job_run_html, job_version_html)
+
     # The character encoding for the email.
     CHARSET = "UTF-8"
-    
+
     # Try to send the email.
     try:
         print("sending email")
-        #Provide the contents of the email.
+        # Provide the contents of the email.
         response = ses.send_email(
             Destination={
                 'ToAddresses': [
@@ -171,7 +173,7 @@ def lambda_handler(event, context):
             },
             Source=SENDER
         )
-    # Display an error if something goes wrong.	
+    # Display an error if something goes wrong.
     except ClientError as e:
         print(e.response['Error']['Message'])
     else:

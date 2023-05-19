@@ -13,14 +13,14 @@ Globals:
   Function:
     Timeout: 3
 Parameters:
-  GlueJobWorkerLimit:
+  GlueJobWorkerThreshold:
     Type: Number
     Default: 10
-    Description: Enter the maximum amount of workers allowed for an AWS Glue Job configuration.
-  GlueJobTimeoutLimit:
+    Description: Enter the maximum amount of workers allowed for an AWS Glue Job configuration before needing to be alerted.
+  GlueJobDurationThreshold:
     Type: Number
     Default: 480
-    Description: Enter the maximum amount of time a Glue job should run before it times out. Default is 8 hours or 480 minutes.
+    Description: Enter the maximum amount of time a Glue job should run before alerting. Default is 8 hours or 480 minutes.
   GlueJobNotifications:
     Type: String
     Default: 'email@anycompany.com'
@@ -128,8 +128,8 @@ Resources:
               Variables:
                 REGION: !Sub '${AWS::Region}'
                 ACCOUNT: !Sub '${AWS::AccountId}'
-                WORKER_LIMIT: !Ref GlueJobWorkerLimit
-                TIMEOUT_LIMIT: !Ref GlueJobTimeoutLimit
+                WORKER_THRESHOLD: !Ref GlueJobWorkerThreshold
+                DURATION_THRESHOLD: !Ref GlueJobDurationThreshold
                 DDB_TABLE: !Ref 'GlueDynamoDBTable'
                 SNS_TOPIC: !Ref GlueJobTrackerTopic
             MemorySize: 128

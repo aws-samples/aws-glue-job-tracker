@@ -14,29 +14,30 @@ dynamo = boto3.resource('dynamodb')
 
 region = os.environ.get('REGION')
 account = os.environ.get('ACCOUNT')
-WORKER_LIMIT = os.environ.get('WORKER_LIMIT')
-TIMEOUT_LIMIT = os.environ.get('TIMEOUT_LIMIT')
+WORKER_THRESHOLD = os.environ.get('WORKER_THRESHOLD')
+DURATION_THRESHOLD = os.environ.get('DURATION_THRESHOLD')
 SNS_TOPIC = os.environ.get('SNS_TOPIC')
 DDB_TABLE = os.environ.get('DDB_TABLE')
 
 dynamo_tbl = dynamo.Table(DDB_TABLE)
 
+
 def lambda_handler(event, context):
     print(event)
-    
+
     event_job_name = event['detail']['jobName']
     event_job_run_id = event['detail']['jobRunId']
-    
+
     print('calling glue get job run...')
     get_glue_job = glue.get_job_run(
-        JobName = event_job_name,
-        RunId = event_job_run_id
-        )
-    print(get_glue_job)
-    
+        JobName=event_job_name,
+        RunId=event_job_run_id
+    )
+
     json_data = json.dumps(get_glue_job, default=str)
-    
-    glue_job = json.loads(json_data, parse_float=lambda x: round(Decimal(x),2))
+
+    glue_job = json.loads(
+        json_data, parse_float=lambda x: round(Decimal(x), 2))
 
     job_name = glue_job['JobRun']['JobName']
     job_run_id = glue_job['JobRun']['Id']
@@ -48,10 +49,10 @@ def lambda_handler(event, context):
     job_runtime = glue_job['JobRun']['ExecutionTime']
     job_start_time = glue_job['JobRun']['StartedOn']
     job_end_time = glue_job['JobRun']['CompletedOn']
-    job_version = glue_job['JobRun']['GlueVersion']
-    exec_class = glue_job['JobRun']['ExecutionClass']
+    job_version = get_glue_job['JobRun'].get('GlueVersion', '0.9')
+    exec_class = get_glue_job['JobRun'].get('ExecutionClass', 'STANDARD')
     glue_id = str(job_run_id + '_' + job_start_time)
-    
+
     def check_autoscaling():
         if 'DPUSeconds' in glue_job['JobRun']:
             dpu_seconds = glue_job['JobRun']['DPUSeconds']
@@ -61,7 +62,7 @@ def lambda_handler(event, context):
             dpu_seconds = 0
             is_autoscaled = 'false'
             return dpu_seconds, is_autoscaled
-            
+
     # set pricing rate between flex or standard
     def add_rate():
         if exec_class == 'STANDARD':
@@ -73,43 +74,69 @@ def lambda_handler(event, context):
         else:
             rate = Decimal('0.44')
             return rate
-    
+
+    # add worker type multiplier for downstream report
+    def add_multiplier():
+        if worker_type == 'G.1X':
+            price_mult = 1
+            return price_mult
+        elif worker_type == 'G.2X':
+            price_mult = 2
+            return price_mult
+        elif worker_type == 'G.4X':
+            price_mult = 4
+            return price_mult
+        elif worker_type == 'G.8X':
+            price_mult = 8
+            return price_mult
+        elif worker_type == 'Z.2X':
+            price_mult = 2
+            return price_mult
+        else:
+            price_mult = 1
+            return price_mult
+
     dpu_seconds, is_autoscaled = check_autoscaling()
     rate = add_rate()
-    
-    job_run_link = 'https://{}.console.aws.amazon.com/gluestudio/home?region={}#/job/{}/run/{} '.format(region, region, job_name, job_run_id)
-    
-    sns_flagged = "The Glue job: {} for job run id {} completed successfully but had limit violation(s), please refer to below and adjust accordingly.\n\n"\
+    price_mult = add_multiplier()
+
+    job_run_link = 'https://{}.console.aws.amazon.com/gluestudio/home?region={}#/job/{}/run/{} '.format(
+        region, region, job_name, job_run_id)
+
+    sns_flagged = "The Glue job: {} for job run id {} completed successfully but exceeded threshold(s), please refer to below and adjust accordingly.\n\n"\
                   "Provisioned workers = {}.\n"\
-                  "Worker limit = {}.\n"\
+                  "Worker threshold = {}.\n"\
                   "Provisioned job timeout = {}.\n"\
-                  "Timout limit = {}.\n"\
-                  "Follow this link to go to the job run - {}".format(job_name, job_run_id, num_workers, WORKER_LIMIT, job_timeout, TIMEOUT_LIMIT, job_run_link)
-    
+                  "Job duration threshold = {}.\n"\
+                  "Follow this link to go to the job run - {}".format(
+                      job_name, job_run_id, num_workers, WORKER_THRESHOLD, job_timeout, DURATION_THRESHOLD, job_run_link)
+
     sns_alert = "The Glue job: {} for job run id {}: is in the status of {} and run attempt #{}.\n\n"\
-                "Follow this link to go to the job run - {}".format(job_name, job_run_id, job_state, run_attempt, job_run_link)
+                "Follow this link to go to the job run - {}".format(
+                    job_name, job_run_id, job_state, run_attempt, job_run_link)
 
     def send_sns(message):
         sns.publish(
-        TopicArn = SNS_TOPIC,
-        Message = message,
-        Subject = 'AWS Glue Notification'
+            TopicArn=SNS_TOPIC,
+            Message=message,
+            Subject='AWS Glue Notification'
         )
-    
+
     def dynamo_ttl():
         current_time = int(time.time())
         add_week = 604800
         ddb_ttl = current_time + add_week
         return ddb_ttl
-    
+
     job_tags = glue.get_tags(
-        ResourceArn='arn:aws:glue:{}:{}:job/{}'.format(region, account, job_name)
+        ResourceArn='arn:aws:glue:{}:{}:job/{}'.format(
+            region, account, job_name)
     )
     # print(job_tags)
-    
+
     # log job run to DynamoDB for later aggregation and insights
     dynamo_tbl.put_item(
-        Item = {
+        Item={
             'glue_id': glue_id,
             'job_name': job_name,
             'job_run_id': job_run_id,
@@ -127,10 +154,11 @@ def lambda_handler(event, context):
             'exec_class': exec_class,
             'is_autoscaled': is_autoscaled,
             'rate': rate,
+            'price_mult': price_mult,
             'ttl': dynamo_ttl()
         }
     )
-    
+
     try:
         if 'remediate' in job_tags['Tags'] and job_tags['Tags']['remediate'] == 'false':
             print('ignoring job')
@@ -138,20 +166,21 @@ def lambda_handler(event, context):
                 'status': 'PASS',
                 'job_name': job_name
             }
-        elif (num_workers > int(WORKER_LIMIT) or job_timeout > int(TIMEOUT_LIMIT)) and job_state == 'SUCCEEDED':
-            print('Workers and/or timeout is over allowed limit. The job Succeeded, but notifying about the limit discrepancy...')
+        elif (num_workers > int(WORKER_THRESHOLD) or job_timeout > int(DURATION_THRESHOLD)) and job_state == 'SUCCEEDED':
+            print('Workers and/or job duration is over allowed threshold. The job Succeeded, but notifying about the threshold discrepancy...')
             send_sns(sns_flagged)
             return {
                 'status': 'FLAGGED',
                 'num_workers': num_workers,
                 'job_timeout': job_timeout,
-                'worker_limit': int(WORKER_LIMIT),
-                'timeout_limit': int(TIMEOUT_LIMIT),
+                'worker_threshold': int(WORKER_THRESHOLD),
+                'duration_threshold': int(DURATION_THRESHOLD),
                 'job_name': job_name,
                 'sns_message': sns_flagged
             }
-        elif job_state == 'FAILED' or job_state == 'TIMEOUT':
-            print('Glue job {} is in {} state, sending alert...'.format(job_name, job_state))
+        elif job_state == 'FAILED' or job_state == 'TIMEOUT' or job_state == 'STOPPED':
+            print('Glue job {} is in {} state, sending alert...'.format(
+                job_name, job_state))
             send_sns(sns_alert)
             return {
                 'status': 'ALERT',
@@ -163,9 +192,8 @@ def lambda_handler(event, context):
             return {
                 'status': 'PASS',
                 'num_workers': num_workers,
-                'worker_limit': int(WORKER_LIMIT),
+                'WORKER_THRESHOLD': int(WORKER_THRESHOLD),
                 'job_name': job_name
             }
     except Exception as e:
         print('Error occured while assigning the payloads: ', e)
-    
