@@ -41,16 +41,15 @@ def lambda_handler(event, context):
     minimum_billed_dur_legacy = 10
 
     def calc_cost(row):
-        if row['job_version'] > 2.0 and row['job_runtime_mins'] > minimum_billed_dur:
-            if row['worker_type'] in ('G.1X', 'G.2X', 'G.4X', 'G.8X'):
-                if row['is_autoscaled'] == 'true' and row['dpu_seconds'] > 0:
-                    return ((row['dpu_seconds'] / 60) / 60) * row['rate']
-                else:
-                    return (row['job_runtime_mins'] / 60) * row['num_workers'] * row['rate'] * row['price_mult']
-            elif row['worker_type'] == 'Z.2X':
+        if row['job_runtime_seconds'] == 0:
+            return 0
+        elif row['job_version'] > 2.0:
+            if row['is_autoscaled'] == 'true' and row['job_runtime_mins'] > minimum_billed_dur and row['dpu_seconds'] > 0:
+                return ((row['dpu_seconds'] / 60) / 60) * row['rate']
+            elif row['is_autoscaled'] == 'false' and row['job_runtime_mins'] > minimum_billed_dur:
                 return (row['job_runtime_mins'] / 60) * row['num_workers'] * row['rate'] * row['price_mult']
-        elif row['job_version'] > 2.0 and row['job_runtime_mins'] < minimum_billed_dur:
-            return (minimum_billed_dur / 60) * row['num_workers'] * row['rate'] * row['price_mult']
+            else:
+                return (minimum_billed_dur / 60) * row['num_workers'] * row['rate'] * row['price_mult']
         else:
             if row['job_runtime_mins'] > minimum_billed_dur_legacy:
                 return (row['job_runtime_mins'] / 60) * row['num_workers'] * row['rate']
